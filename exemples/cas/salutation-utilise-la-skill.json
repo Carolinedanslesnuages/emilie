@@ -1,0 +1,9 @@
+{
+  "type": "skill",
+  "demande": "Écris une salutation dans le projet.",
+  "projet": "../projet",
+  "attendu": {
+    "skills": ["salutation"],
+    "fichiersModifies": ["salut.txt"]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@carolinedanslesnuages/emilie",
+  "version": "0.0.0",
+  "description": "Banc d'essai pour vos consignes d'agent de code (skills, AGENTS.md, consignes piégées) : rejoue des cas, vérifie le comportement, et affiche l'empreinte carbone avant de lancer.",
+  "type": "module",
+  "bin": { "emilie": "bin/emilie.mjs" },
+  "files": ["bin", "src", "exemples"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": { "@carolinedanslesnuages/val": "github:Carolinedanslesnuages/val#e5129ab84898321f2083a0ee143af72e755031b5" },
+  "keywords": ["claude-code", "agent", "skills", "evaluation", "agents-md", "prompt-injection"],
+  "repository": { "type": "git", "url": "git+https://github.com/Carolinedanslesnuages/emilie.git" },
+  "license": "MIT"
+}
