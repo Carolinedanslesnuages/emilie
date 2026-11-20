@@ -27,7 +27,7 @@ npx github:Carolinedanslesnuages/emilie                    # demande confirmatio
 npx github:Carolinedanslesnuages/emilie --modele haiku --fois 3
 ```
 
-Exemple réel, sur les cas d'exemple du dépôt, avec Claude Code et Haiku :
+Exemple réel (sortie abrégée), sur les cas d'exemple du dépôt, avec Claude Code et Haiku :
 
 ```text
 Émilie · 3 cas × 1 passage = 3 essais · agent : claude (haiku)
