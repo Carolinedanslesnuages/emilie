@@ -18,7 +18,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@carolinedanslesnuages/val": "github:Carolinedanslesnuages/val#e5129ab84898321f2083a0ee143af72e755031b5"
+    "@carolinedanslesnuages/val": "github:Carolinedanslesnuages/val#26dbfc27eef39258dfce543e3fda1ec9a86ca51f"
   },
   "keywords": [
     "claude-code",

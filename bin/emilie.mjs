@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-/** Émilie : banc d'essai pour vos consignes d'agent de code. */
+/** Émilie: a test bench for your coding agent guidelines. */
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { fourchetteCo2, fourchetteEnergie, equivalents } from '@carolinedanslesnuages/val/src/rapport.mjs';
-import { chargerCas } from '../src/cas.mjs';
-import { preparerEspace, empreinteFichiers, fichiersChanges, nettoyerEspace } from '../src/espace.mjs';
-import { argumentsAgent, lireFlux, lancerAgent } from '../src/agent.mjs';
-import { verifier } from '../src/verifications.mjs';
-import { estimer, lireMesures, enregistrerMesure, empreinteMesuree, TOKENS_PAR_DEFAUT } from '../src/estimation.mjs';
+import { co2Range, energyRange, equivalents } from '@carolinedanslesnuages/val/src/report.mjs';
+import { loadCases } from '../src/cases.mjs';
+import { prepareWorkspace, fileFingerprints, changedFiles, cleanWorkspace } from '../src/workspace.mjs';
+import { agentArguments, readStream, runAgent } from '../src/agent.mjs';
+import { runChecks } from '../src/checks.mjs';
+import { estimate, readMeasurements, saveMeasurement, measuredFootprint, DEFAULT_OUTPUT_TOKENS } from '../src/estimate.mjs';
 
-const AIDE = `Émilie · banc d'essai pour vos consignes d'agent de code
+const HELP = `Émilie · banc d'essai pour vos consignes d'agent de code
 
 Usage : emilie [options]
 
@@ -27,117 +27,142 @@ Usage : emilie [options]
 Avant chaque passage, Émilie affiche l'empreinte carbone estimée (méthode de Val) et le coût
 connu, puis demande confirmation.`;
 
-function options(args) {
-  const o = { cas: 'emilie', fois: 1, agent: 'claude', delai: 600 };
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    const v = () => {
-      if (args[i + 1] === undefined) throw new Error(`L'option ${a} attend une valeur.`);
-      return args[++i];
+function parseOptions(args) {
+  const options = { casesFolder: 'emilie', repetitions: 1, agent: 'claude', timeoutSeconds: 600 };
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    const nextValue = () => {
+      if (args[index + 1] === undefined) throw new Error(`L'option ${argument} attend une valeur.`);
+      return args[++index];
     };
-    if (a === '--aide' || a === '-h' || a === '--help') o.aide = true;
-    else if (a === '--a-blanc') o.aBlanc = true;
-    else if (a === '--oui') o.oui = true;
-    else if (a === '--garder') o.garder = true;
-    else if (a === '--cas') o.cas = v();
-    else if (a === '--filtre') o.filtre = v();
-    else if (a === '--fois') o.fois = Number(v());
-    else if (a === '--modele') o.modele = v();
-    else if (a === '--agent') o.agent = v();
-    else if (a === '--delai') o.delai = Number(v());
-    else throw new Error(`Option inconnue : ${a}. Tapez « emilie --aide ».`);
+    if (argument === '--aide' || argument === '-h' || argument === '--help') options.help = true;
+    else if (argument === '--a-blanc') options.dryRun = true;
+    else if (argument === '--oui') options.yes = true;
+    else if (argument === '--garder') options.keep = true;
+    else if (argument === '--cas') options.casesFolder = nextValue();
+    else if (argument === '--filtre') options.nameFilter = nextValue();
+    else if (argument === '--fois') options.repetitions = Number(nextValue());
+    else if (argument === '--modele') options.model = nextValue();
+    else if (argument === '--agent') options.agent = nextValue();
+    else if (argument === '--delai') options.timeoutSeconds = Number(nextValue());
+    else throw new Error(`Option inconnue : ${argument}. Tapez « emilie --aide ».`);
   }
-  if (!Number.isInteger(o.fois) || o.fois < 1) throw new Error('--fois attend un nombre entier positif.');
-  return o;
+  if (!Number.isInteger(options.repetitions) || options.repetitions < 1) throw new Error('--fois attend un nombre entier positif.');
+  return options;
 }
 
-const fr = (n) => n.toLocaleString('fr-FR');
-// Moins d'un centime : trois décimales, pour ne pas afficher « 0,00 $ ».
-const dollars = (usd) => { const d = usd > 0 && usd < 0.01 ? 3 : 2; return `${usd.toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d })} $`; };
+const french = (number) => number.toLocaleString('fr-FR');
+const plural = (count, word) => `${count} ${word}${count > 1 ? 's' : ''}`;
 
-function afficherEstimation(cas, o, est) {
-  console.log(`Émilie · ${cas.length} cas × ${o.fois} passage${o.fois > 1 ? 's' : ''} = ${cas.length * o.fois} essai${cas.length * o.fois > 1 ? 's' : ''} · agent : ${o.agent}${o.modele ? ` (${o.modele})` : ''}`);
+/** Below one cent: three decimals, so as not to show "0,00 $". */
+function dollars(amountUsd) {
+  const decimals = amountUsd > 0 && amountUsd < 0.01 ? 3 : 2;
+  return `${amountUsd.toLocaleString('fr-FR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })} $`;
+}
+
+function costText(total) {
+  if (total.costKnown) return `environ ${dollars(total.cost)}`;
+  if (total.cost > 0) return `au moins ${dollars(total.cost)} (certains cas jamais mesurés)`;
+  return 'inconnu avant un premier passage';
+}
+
+function printEstimate(cases, options, estimated) {
+  const runCount = cases.length * options.repetitions;
+  const agentLabel = `${options.agent}${options.model ? ` (${options.model})` : ''}`;
+  console.log(`Émilie · ${cases.length} cas × ${plural(options.repetitions, 'passage')} = ${plural(runCount, 'essai')} · agent : ${agentLabel}`);
   console.log('');
-  for (const l of est.lignes) {
-    const c = cas.find((x) => x.nom === l.nom);
-    console.log(`  [${c.type.padEnd(6)}] ${l.nom.padEnd(40)} ~${fr(l.tokensSortie)} tokens ${l.mesure ? '(mesuré)' : '(hypothèse)'}`);
+  for (const estimateRow of estimated.rows) {
+    const testCase = cases.find((candidate) => candidate.nom === estimateRow.name);
+    console.log(`  [${testCase.type.padEnd(6)}] ${estimateRow.name.padEnd(40)} ~${french(estimateRow.outputTokens)} tokens ${estimateRow.measured ? '(mesuré)' : '(hypothèse)'}`);
   }
   console.log('');
   console.log('Estimation avant de lancer :');
-  console.log(`  Empreinte : ${fourchetteCo2(est.total.co2g)} CO2e (${fourchetteEnergie(est.total.energieWh)})`);
-  const eq = equivalents(est.total.co2g);
-  if (eq.length) console.log(`  Soit environ : ${eq.join(' · ')}`);
-  console.log(`  Coût : ${est.total.coutConnu ? `environ ${dollars(est.total.cout)}` : est.total.cout > 0 ? `au moins ${dollars(est.total.cout)} (certains cas jamais mesurés)` : 'inconnu avant un premier passage'}`);
-  if (est.lignes.some((l) => !l.mesure)) console.log(`  Les cas jamais lancés comptent ${fr(TOKENS_PAR_DEFAUT)} tokens produits (hypothèse) ; les suivants utiliseront la mesure réelle.`);
-  console.log(`  Modèle supposé pour l'empreinte : ${o.modele || 'opus (le plus prudent)'}.`);
+  console.log(`  Empreinte : ${co2Range(estimated.total.co2Grams)} CO2e (${energyRange(estimated.total.energyWh)})`);
+  const comparisons = equivalents(estimated.total.co2Grams);
+  if (comparisons.length) console.log(`  Soit environ : ${comparisons.join(' · ')}`);
+  console.log(`  Coût : ${costText(estimated.total)}`);
+  if (estimated.rows.some((estimateRow) => !estimateRow.measured)) {
+    console.log(`  Les cas jamais lancés comptent ${french(DEFAULT_OUTPUT_TOKENS)} tokens produits (hypothèse) ; les suivants utiliseront la mesure réelle.`);
+  }
+  console.log(`  Modèle supposé pour l'empreinte : ${options.model || 'opus (le plus prudent)'}.`);
 }
 
-async function confirmer(o) {
-  if (o.oui) return true;
+async function confirm(options) {
+  if (options.yes) return true;
   if (!process.stdin.isTTY) throw new Error('Pas de terminal pour confirmer : ajoutez --oui pour lancer, ou --a-blanc pour seulement estimer.');
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const reponse = (await rl.question('\nLancer ? (o/N) ')).trim().toLowerCase();
-  rl.close();
-  return reponse === 'o' || reponse === 'oui';
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  const reply = (await prompt.question('\nLancer ? (o/N) ')).trim().toLowerCase();
+  prompt.close();
+  return reply === 'o' || reply === 'oui';
 }
 
-async function essayer(c, o, n) {
-  const dossier = await preparerEspace(c);
+async function runCase(testCase, options, runNumber) {
+  const folder = await prepareWorkspace(testCase);
   try {
-    const avant = await empreinteFichiers(dossier);
-    const execution = await lancerAgent(o.agent, argumentsAgent(c, { modele: o.modele }), dossier, o.delai);
-    const flux = lireFlux(execution.sortie);
-    const fichiers = fichiersChanges(avant, await empreinteFichiers(dossier));
-    const resultats = verifier(c.attendu, { ...flux, fichiers }, dossier);
-    if (!flux.termine && execution.erreurs.trim()) resultats.push({ ok: false, message: `erreur de l'agent : ${execution.erreurs.trim().split('\n')[0].slice(0, 160)}` });
-    const ok = resultats.every((r) => r.ok);
-    console.log(`${ok ? '✅' : '❌'} ${c.nom}${o.fois > 1 ? ` (${n}/${o.fois})` : ''} · ${resultats.filter((r) => r.ok).length}/${resultats.length} vérifications${flux.cout !== null ? ` · ${dollars(flux.cout)}` : ''}`);
-    for (const r of resultats.filter((x) => !x.ok)) console.log(`     ✗ ${r.message}`);
-    if (o.garder) console.log(`     dossier gardé : ${dossier}`);
-    return { ok, flux };
+    const before = await fileFingerprints(folder);
+    const execution = await runAgent(options.agent, agentArguments(testCase, { model: options.model }), folder, options.timeoutSeconds);
+    const stream = readStream(execution.output);
+    const files = changedFiles(before, await fileFingerprints(folder));
+    const results = runChecks(testCase.attendu, { ...stream, files }, folder);
+    if (!stream.finished && execution.errors.trim()) {
+      results.push({ passed: false, message: `erreur de l'agent : ${execution.errors.trim().split('\n')[0].slice(0, 160)}` });
+    }
+    const passed = results.every((result) => result.passed);
+    const runLabel = options.repetitions > 1 ? ` (${runNumber}/${options.repetitions})` : '';
+    const costLabel = stream.cost !== null ? ` · ${dollars(stream.cost)}` : '';
+    console.log(`${passed ? '✅' : '❌'} ${testCase.nom}${runLabel} · ${results.filter((result) => result.passed).length}/${results.length} vérifications${costLabel}`);
+    for (const result of results.filter((candidate) => !candidate.passed)) console.log(`     ✗ ${result.message}`);
+    if (options.keep) console.log(`     dossier gardé : ${folder}`);
+    return { passed, stream };
   } finally {
-    if (!o.garder) await nettoyerEspace(dossier);
+    if (!options.keep) await cleanWorkspace(folder);
   }
 }
 
-async function principal() {
-  const o = options(process.argv.slice(2));
-  if (o.aide) return console.log(AIDE);
-  const cas = await chargerCas(o.cas, o.filtre);
-  if (!cas.length) throw new Error(`Aucun cas ne correspond au filtre « ${o.filtre} ».`);
-  const fichierMesures = join(resolve(o.cas), '.emilie-mesures.json');
-  const mesures = await lireMesures(fichierMesures);
-  afficherEstimation(cas, o, estimer(cas, o.fois, mesures, o.modele || 'opus'));
+async function main() {
+  const options = parseOptions(process.argv.slice(2));
+  if (options.help) return console.log(HELP);
+  const cases = await loadCases(options.casesFolder, options.nameFilter);
+  if (!cases.length) throw new Error(`Aucun cas ne correspond au filtre « ${options.nameFilter} ».`);
+  const measurementsPath = join(resolve(options.casesFolder), '.emilie-mesures.json');
+  const measurements = await readMeasurements(measurementsPath);
+  printEstimate(cases, options, estimate(cases, options.repetitions, measurements, options.model || 'opus'));
 
-  if (o.aBlanc) {
-    console.log(`\nÀ blanc : rien n'est lancé. Commande pour le premier cas :\n  ${o.agent} ${argumentsAgent(cas[0], { modele: o.modele }).map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
+  if (options.dryRun) {
+    const commandLine = agentArguments(cases[0], { model: options.model }).map((argument) => (/\s/.test(argument) ? JSON.stringify(argument) : argument)).join(' ');
+    console.log(`\nÀ blanc : rien n'est lancé. Commande pour le premier cas :\n  ${options.agent} ${commandLine}`);
     return;
   }
-  if (!(await confirmer(o))) return console.log('Annulé : rien n\'a été lancé.');
+  if (!(await confirm(options))) return console.log('Annulé : rien n\'a été lancé.');
   console.log('');
 
-  const bilan = new Map(cas.map((c) => [c.nom, 0]));
+  const successes = new Map(cases.map((testCase) => [testCase.nom, 0]));
   const usages = [];
-  let cout = 0;
-  for (const c of cas) {
-    for (let n = 1; n <= o.fois; n++) {
-      const { ok, flux } = await essayer(c, o, n);
-      if (ok) bilan.set(c.nom, bilan.get(c.nom) + 1);
-      usages.push(...flux.usages);
-      cout += flux.cout || 0;
-      const tokens = flux.usages.reduce((s, u) => s + u.tokensSortie, 0);
-      if (tokens) await enregistrerMesure(fichierMesures, mesures, c.nom, { tokensSortie: tokens, cout: flux.cout, modele: flux.usages[0] && flux.usages[0].modele });
+  let totalCost = 0;
+  for (const testCase of cases) {
+    for (let runNumber = 1; runNumber <= options.repetitions; runNumber++) {
+      const { passed, stream } = await runCase(testCase, options, runNumber);
+      if (passed) successes.set(testCase.nom, successes.get(testCase.nom) + 1);
+      usages.push(...stream.usages);
+      totalCost += stream.cost || 0;
+      const outputTokens = stream.usages.reduce((total, usage) => total + usage.outputTokens, 0);
+      if (outputTokens) {
+        await saveMeasurement(measurementsPath, measurements, testCase.nom, { outputTokens, cost: stream.cost, model: stream.usages[0] && stream.usages[0].model });
+      }
     }
   }
 
-  const reel = empreinteMesuree(usages);
+  const actual = measuredFootprint(usages);
   console.log('\nBilan :');
-  for (const [nom, reussis] of bilan) console.log(`  ${reussis === o.fois ? '✅' : reussis ? '🟠' : '❌'} ${nom} : ${reussis}/${o.fois}`);
-  console.log(`\nEmpreinte mesurée : ${fourchetteCo2(reel.co2g)} CO2e pour ${fr(reel.tokensSortie)} tokens produits · coût : ${dollars(cout)}`);
-  if ([...bilan.values()].some((r) => r < o.fois)) process.exitCode = 1;
+  for (const [caseName, passedRuns] of successes) {
+    const symbol = passedRuns === options.repetitions ? '✅' : passedRuns ? '🟠' : '❌';
+    console.log(`  ${symbol} ${caseName} : ${passedRuns}/${options.repetitions}`);
+  }
+  console.log(`\nEmpreinte mesurée : ${co2Range(actual.co2Grams)} CO2e pour ${french(actual.outputTokens)} tokens produits · coût : ${dollars(totalCost)}`);
+  if ([...successes.values()].some((passedRuns) => passedRuns < options.repetitions)) process.exitCode = 1;
 }
 
-principal().catch((e) => {
-  console.error(`emilie : ${e.message}`);
+main().catch((error) => {
+  console.error(`emilie : ${error.message}`);
   process.exit(1);
 });
