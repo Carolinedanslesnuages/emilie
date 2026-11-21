@@ -1,65 +1,67 @@
 /**
- * Lance l'agent sur un cas et lit son flux d'événements (format stream-json de Claude Code).
- * L'agent est une commande : « claude » par défaut, ou toute commande qui produit ce flux.
+ * Runs the agent on a case and reads its event stream (Claude Code's stream-json format).
+ * The agent is a command: "claude" by default, or any command that produces this stream.
  */
 import { spawn } from 'node:child_process';
 
-/** Arguments donnés à Claude Code : projet isolé de vos réglages personnels, modifications permises. */
-export function argumentsAgent(cas, { modele } = {}) {
-  const args = ['-p', cas.demande, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits', '--setting-sources', 'project,local', '--strict-mcp-config'];
-  if (modele) args.push('--model', modele);
+/** Arguments given to Claude Code: project isolated from your personal settings, edits allowed. */
+export function agentArguments(testCase, { model } = {}) {
+  const args = ['-p', testCase.demande, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits', '--setting-sources', 'project,local', '--strict-mcp-config'];
+  if (model) args.push('--model', model);
   return args;
 }
 
-/** Lit le flux : outils appelés, réponse finale, tokens par modèle, coût. */
-export function lireFlux(texte) {
-  const outils = [];
-  let fin = null;
-  for (const ligne of texte.split('\n')) {
-    if (!ligne.trim()) continue;
-    let d;
+/** Reads the stream: tools called, final answer, tokens per model, cost. */
+export function readStream(text) {
+  const toolCalls = [];
+  let result = null;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let event;
     try {
-      d = JSON.parse(ligne);
+      event = JSON.parse(line);
     } catch {
       continue;
     }
-    if (d.type === 'assistant' && d.message && Array.isArray(d.message.content)) {
-      for (const c of d.message.content) if (c.type === 'tool_use') outils.push({ nom: c.name, entree: c.input || {} });
-    } else if (d.type === 'result') fin = d;
+    if (event.type === 'assistant' && event.message && Array.isArray(event.message.content)) {
+      for (const block of event.message.content) {
+        if (block.type === 'tool_use') toolCalls.push({ name: block.name, input: block.input || {} });
+      }
+    } else if (event.type === 'result') result = event;
   }
-  const usages = Object.entries((fin && fin.modelUsage) || {}).map(([modele, u]) => ({
-    modele,
-    tokensEntree: (u.inputTokens || 0) + (u.cacheReadInputTokens || 0) + (u.cacheCreationInputTokens || 0),
-    tokensSortie: u.outputTokens || 0,
+  const usages = Object.entries((result && result.modelUsage) || {}).map(([model, usage]) => ({
+    model,
+    inputTokens: (usage.inputTokens || 0) + (usage.cacheReadInputTokens || 0) + (usage.cacheCreationInputTokens || 0),
+    outputTokens: usage.outputTokens || 0,
   }));
   return {
-    outils,
-    skills: outils.filter((o) => o.nom === 'Skill').map((o) => o.entree.skill || o.entree.name).filter(Boolean),
-    commandes: outils.filter((o) => o.nom === 'Bash').map((o) => String(o.entree.command || '')),
-    reponse: fin ? String(fin.result || '') : '',
-    termine: !!fin && !fin.is_error,
-    cout: fin && Number.isFinite(fin.total_cost_usd) ? fin.total_cost_usd : null,
+    toolCalls,
+    skills: toolCalls.filter((call) => call.name === 'Skill').map((call) => call.input.skill || call.input.name).filter(Boolean),
+    commands: toolCalls.filter((call) => call.name === 'Bash').map((call) => String(call.input.command || '')),
+    answer: result ? String(result.result || '') : '',
+    finished: !!result && !result.is_error,
+    cost: result && Number.isFinite(result.total_cost_usd) ? result.total_cost_usd : null,
     usages,
   };
 }
 
-/** Exécute la commande de l'agent dans le dossier d'essai, avec un délai maximum. */
-export function lancerAgent(commande, args, dossier, delaiSecondes = 600) {
-  return new Promise((resoudre) => {
-    const [exe, ...prefixe] = commande.split(' ').filter(Boolean);
-    const p = spawn(exe, [...prefixe, ...args], { cwd: dossier, stdio: ['ignore', 'pipe', 'pipe'] });
-    let sortie = '';
-    let erreurs = '';
-    p.stdout.on('data', (d) => (sortie += d));
-    p.stderr.on('data', (d) => (erreurs += d));
-    const minuteur = setTimeout(() => p.kill('SIGTERM'), delaiSecondes * 1000);
-    p.on('error', (e) => {
-      clearTimeout(minuteur);
-      resoudre({ code: -1, sortie, erreurs: `${erreurs}${e.message}` });
+/** Runs the agent command in the test folder, with a time limit. */
+export function runAgent(command, args, folder, timeoutSeconds = 600) {
+  return new Promise((resolve) => {
+    const [executable, ...prefixArgs] = command.split(' ').filter(Boolean);
+    const child = spawn(executable, [...prefixArgs, ...args], { cwd: folder, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    let errors = '';
+    child.stdout.on('data', (chunk) => (output += chunk));
+    child.stderr.on('data', (chunk) => (errors += chunk));
+    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutSeconds * 1000);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      resolve({ code: -1, output, errors: `${errors}${error.message}` });
     });
-    p.on('close', (code) => {
-      clearTimeout(minuteur);
-      resoudre({ code, sortie, erreurs });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, output, errors });
     });
   });
 }
