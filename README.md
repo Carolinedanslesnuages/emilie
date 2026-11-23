@@ -22,9 +22,9 @@ Il faut Node.js 20 ou plus récent, et un agent qui produit le flux `stream-json
 (par défaut : la commande `claude`).
 
 ```sh
-npx github:Carolinedanslesnuages/emilie --a-blanc          # le plan et l'estimation, sans rien lancer
-npx github:Carolinedanslesnuages/emilie                    # demande confirmation, puis lance
-npx github:Carolinedanslesnuages/emilie --modele haiku --fois 3
+npx @carolinedanslesnuages/emilie --a-blanc          # le plan et l'estimation, sans rien lancer
+npx @carolinedanslesnuages/emilie                    # demande confirmation, puis lance
+npx @carolinedanslesnuages/emilie --modele haiku --fois 3
 ```
 
 Exemple réel (sortie abrégée), sur les cas d'exemple du dépôt, avec Claude Code et Haiku :
